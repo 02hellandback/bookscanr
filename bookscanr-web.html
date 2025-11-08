@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BookScanr — Browser‑Only MVP</title>
+  <style>
+    :root { --bg:#0b0d10; --panel:#111418; --muted:#9aa4b2; --text:#e8edf2; --brand:#7cc4ff; }
+    *{box-sizing:border-box}
+    body{margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial; background:var(--bg); color:var(--text)}
+    header{padding:24px 16px; border-bottom:1px solid #1b2128; background:linear-gradient(180deg,#0c1117, #0b0d10)}
+    .wrap{max-width:1100px; margin:0 auto; padding:24px 16px}
+    h1{margin:0 0 6px; font-size:24px}
+    p.sub{margin:0; color:var(--muted)}
+    .card{background:var(--panel); border:1px solid #1c232c; border-radius:16px; padding:18px; box-shadow: 0 8px 30px rgba(0,0,0,.35);}
+    .grid{display:grid; gap:14px}
+    @media (min-width:900px){ .grid{grid-template-columns: 380px 1fr} }
+    .btn{background:#18212b; color:#e8edf2; border:1px solid #263240; padding:10px 14px; border-radius:10px; cursor:pointer}
+    .btn[disabled]{opacity:.6; cursor:not-allowed}
+    .row{display:flex; gap:10px; align-items:center; flex-wrap:wrap}
+    input[type=file]{display:block; width:100%}
+    progress{width:100%}
+    .thumbs{display:grid; grid-template-columns: repeat(auto-fill,minmax(120px,1fr)); gap:10px}
+    .thumb{position:relative; border:1px solid #1d2630; border-radius:12px; overflow:hidden; background:#0c1117}
+    .thumb img{width:100%; height:120px; object-fit:cover}
+    .badge{position:absolute; top:6px; left:6px; background:#0c151f; border:1px solid #223042; color:#9dd3ff; padding:2px 6px; font-size:12px; border-radius:999px}
+    details{background:#0c1117; border:1px solid #1d2630; border-radius:12px; padding:10px 12px}
+    details>summary{cursor:pointer; color:#b9c4cf}
+    pre{white-space:pre-wrap; word-break:break-word}
+    table{width:100%; border-collapse:separate; border-spacing:0;}
+    th,td{padding:10px 12px; border-bottom:1px solid #1a2128; vertical-align:top}
+    th{color:#b9c4cf; text-align:left}
+    .muted{color:var(--muted)}
+    .pill{display:inline-block; padding:2px 8px; border-radius:999px; border:1px solid #203040; color:#9dd3ff; font-size:12px}
+    footer{color:#758395; padding:24px 16px; text-align:center}
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap">
+      <h1>📚 BookScanr — Browser‑Only MVP</h1>
+      <p class="sub">No installs. Runs entirely in your browser with WebAssembly OCR (Tesseract.js). We’ll try to read spines/covers and match against Open Library.</p>
+    </div>
+  </header>
+
+  <div class="wrap grid">
+    <section class="card">
+      <h3>1) Upload photos</h3>
+      <input id="files" type="file" accept="image/*" multiple />
+      <div class="row" style="margin-top:10px">
+        <button id="scan" class="btn">Scan</button>
+        <button id="clear" class="btn" style="background:#121821">Clear</button>
+        <span id="counter" class="muted"></span>
+      </div>
+      <div style="margin-top:12px"><progress id="prog" value="0" max="100" hidden></progress></div>
+      <div class="thumbs" id="thumbs" style="margin-top:12px"></div>
+      <details style="margin-top:12px"><summary>Tips for best results</summary>
+        <ul>
+          <li>Good lighting, minimal glare</li>
+          <li>Avoid extreme angles; fill frame with the shelf/cover</li>
+          <li>Multiple photos from slightly different angles can help</li>
+        </ul>
+      </details>
+    </section>
+
+    <section>
+      <div class="card" style="margin-bottom:14px">
+        <div class="row" style="justify-content:space-between">
+          <h3 style="margin:0">2) Results</h3>
+          <div class="row">
+            <button id="exportCsv" class="btn" disabled>Export CSV</button>
+            <span class="pill" title="Local processing">Local OCR</span>
+          </div>
+        </div>
+        <div id="results" style="margin-top:10px">
+          <p class="muted">Upload images and click Scan.</p>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3 style="margin-top:0">What this MVP does</h3>
+        <ul>
+          <li>Runs OCR in your browser using Tesseract.js (WebAssembly)</li>
+          <li>Parses a rough <em>title / author / ISBN</em> from the text</li>
+          <li>Queries Open Library for likely matches</li>
+          <li>Lets you export a CSV of the detections</li>
+        </ul>
+        <p class="muted">No images leave your device unless Open Library queries include text; we don’t upload your photos anywhere.</p>
+      </div>
+    </section>
+  </div>
+
+  <footer>BookScanr MVP — client‑only prototype</footer>
+
+  <!-- Tesseract.js CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@4.0.2/dist/tesseract.min.js"></script>
+  <script>
+    // --- Utilities ---
+    const $ = s => document.querySelector(s);
+    const results = [];
+
+    function sanitize(s){ return (s||'').replace(/[\\n\\r\\t]+/g,' ').replace(/\\s{2,}/g,' ').trim(); }
+    function alphaScore(s){ return (s||'').split('').filter(c=>/[A-Za-z]/.test(c)).length }
+    function parseISBN(text){
+      const raw = text.replace(/-/g,' ');
+      const m13 = raw.match(/(?<!\\d)(97[89][\\s]?\\d{1,5}[\\s]?\\d{1,7}[\\s]?\\d{1,7}[\\s]?\\d)(?!\\d)/);
+      if(m13) return m13[1].replace(/\\s/g,'');
+      const compact = text.replace(/[-\\s]/g,'');
+      const m10 = compact.match(/(?<!\\d)(\\d{9}[\\dXx])(?!\\d)/);
+      return m10 ? m10[1].toUpperCase() : null;
+    }
+
+    function parseTitleAuthor(text){
+      const lines = text.split(/\\n+/).map(s=>s.trim()).filter(Boolean);
+      if(!lines.length) return { title_guess:null, author_guess:null, isbn:null };
+      const sorted = [...lines].sort((a,b)=>alphaScore(b)-alphaScore(a));
+      const title_guess = sorted[0] || null;
+      let author_guess = null;
+      for(const ln of sorted.slice(1,5)){
+        const w = ln.split(/\\s+/);
+        if(w.length<=5){ author_guess = ln; break; }
+      }
+      const isbn = parseISBN(text);
+      return { title_guess, author_guess, isbn };
+    }
+
+    async function openLibraryLookup({title, author, isbn}){
+      try{
+        if(isbn){
+          const r = await fetch(`https://openlibrary.org/isbn/${encodeURIComponent(isbn)}.json`);
+          if(r.ok){
+            const j = await r.json();
+            return { source:'openlibrary:isbn', title:j.title, authors:j.authors, publish_date:j.publish_date, identifiers:{isbn}, raw:j, score:1.0 };
+          }
+        }
+        // fallback search
+        const parts = [];
+        if(title) parts.push(title);
+        if(author) parts.push(author);
+        if(!parts.length) return {};
+        const q = encodeURIComponent(parts.join(' '));
+        const r = await fetch(`https://openlibrary.org/search.json?q=${q}`);
+        if(!r.ok) return {};
+        const j = await r.json();
+        const docs = j.docs||[];
+        if(!docs.length) return {};
+        const tset = new Set((title||'').toLowerCase().split(/\\s+/));
+        const aset = new Set((author||'').toLowerCase().split(/\\s+/));
+        function score(d){
+          let s=0;
+          if(d.title){
+            const dset = new Set(String(d.title).toLowerCase().split(/\\s+/));
+            s += [...tset].filter(x=>dset.has(x)).length / Math.max(1, tset.size);
+          }
+          if(d.author_name){
+            const nset = new Set(String(d.author_name.join(' ')).toLowerCase().split(/\\s+/));
+            s += [...aset].filter(x=>nset.has(x)).length / Math.max(1, aset.size);
+          }
+          if(d.isbn) s += 0.2;
+          return s;
+        }
+        const best = docs.reduce((a,b)=> score(a)>score(b)?a:b);
+        return { source:'openlibrary:search', title:best.title, authors:best.author_name, publish_year:best.first_publish_year, identifiers:{isbn:(best.isbn||[])[0]||null}, raw:best, score:0.7 };
+      }catch(e){
+        return { error:String(e) };
+      }
+    }
+
+    // --- UI wiring ---
+    const fileInput = $('#files');
+    const thumbs = $('#thumbs');
+    const prog = $('#prog');
+    const scanBtn = $('#scan');
+    const clearBtn = $('#clear');
+    const resultsEl = $('#results');
+    const counter = $('#counter');
+    const exportBtn = $('#exportCsv');
+
+    function renderThumbs(list){
+      thumbs.innerHTML = '';
+      Array.from(list).forEach((f,i)=>{
+        const url = URL.createObjectURL(f);
+        const div = document.createElement('div');
+        div.className = 'thumb';
+        div.innerHTML = `<img src="${url}" alt="${f.name}"><span class="badge">${i+1}</span>`;
+        thumbs.appendChild(div);
+      });
+      counter.textContent = list.length ? `${list.length} file(s) selected` : '';
+    }
+
+    fileInput.addEventListener('change', e=> renderThumbs(e.target.files));
+    clearBtn.addEventListener('click', ()=>{ fileInput.value=''; results.length=0; resultsEl.innerHTML='<p class="muted">Cleared. Upload images and click Scan.</p>'; thumbs.innerHTML=''; counter.textContent=''; exportBtn.disabled = true; });
+
+    function rowHTML(item){
+      const matchStr = item.match?.title ? `${item.match.title}${item.match.authors? ' — '+(Array.isArray(item.match.authors)? item.match.authors.join(', '): item.match.authors):''}` : '—';
+      return `<tr>
+        <td>${item.filename}</td>
+        <td>${item.parsed?.title_guess || '—'}</td>
+        <td>${item.parsed?.author_guess || '—'}</td>
+        <td>${item.parsed?.isbn || '—'}</td>
+        <td>${matchStr}</td>
+        <td><details><summary>OCR</summary><pre>${(item.ocr_text||'').replace(/[<>&]/g, s=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[s]))}</pre></details></td>
+      </tr>`
+    }
+
+    function renderResults(){
+      if(!results.length){ resultsEl.innerHTML = '<p class="muted">No results yet.</p>'; return; }
+      const rows = results.map(rowHTML).join('');
+      resultsEl.innerHTML = `<table>
+        <thead><tr><th>File</th><th>Title (guess)</th><th>Author (guess)</th><th>ISBN</th><th>Best match</th><th>Details</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+      exportBtn.disabled = false;
+    }
+
+    function toCSV(items){
+      const headers = ['file','title_guess','author_guess','isbn','match_title','match_authors'];
+      const lines = [headers.join(',')];
+      for(const it of items){
+        const mtitle = it.match?.title || '';
+        const mauth = Array.isArray(it.match?.authors) ? it.match.authors.join('; ') : (it.match?.authors||'');
+        const row = [it.filename, it.parsed?.title_guess||'', it.parsed?.author_guess||'', it.parsed?.isbn||'', mtitle, mauth]
+          .map(v=> '\"'+ String(v).replace(/\"/g,'\"\"') +'\"').join(',');
+        lines.push(row);
+      }
+      return lines.join('\\n');
+    }
+
+    exportBtn.addEventListener('click', ()=>{
+      const csv = toCSV(results);
+      const blob = new Blob([csv], {type:'text/csv'});
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'bookscanr_results.csv';
+      a.click();
+    });
+
+    async function ocrImage(file){
+      const imgURL = URL.createObjectURL(file);
+      const worker = await Tesseract.createWorker();
+      await worker.loadLanguage('eng');
+      await worker.initialize('eng');
+      let best = { text:'', score:-1 };
+      for(const angle of [0, 90, 180, 270]){
+        const { data } = await worker.recognize(imgURL, { rotateAuto:false, rectangle:null, config: { tessedit_pageseg_mode: 6 } });
+        const scored = { text: data.text||'', score: alphaScore(data.text||'') };
+        if(scored.score > best.score) best = scored;
+      }
+      await worker.terminate();
+      return best.text;
+    }
+
+    scanBtn.addEventListener('click', async ()=>{
+      const files = fileInput.files;
+      if(!files.length){ alert('Select one or more images first.'); return; }
+      scanBtn.disabled = true; prog.hidden=false; prog.value = 0; results.length = 0; resultsEl.innerHTML = '<p class="muted">Processing…</p>';
+      const N = files.length; let i = 0;
+      for(const f of files){
+        try{
+          const text = await ocrImage(f);
+          const parsed = parseTitleAuthor(text);
+          const match = await openLibraryLookup({ title: parsed.title_guess, author: parsed.author_guess, isbn: parsed.isbn });
+          results.push({ filename:f.name, ocr_text:text, parsed, match });
+        }catch(e){
+          results.push({ filename:f.name, error:String(e) });
+        }
+        i++; prog.value = Math.round(100*i/N);
+        renderResults();
+      }
+      prog.hidden = true; scanBtn.disabled = false;
+    });
+  </script>
+</body>
+</html>
